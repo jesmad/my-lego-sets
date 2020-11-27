@@ -382,6 +382,28 @@ app.get("/search-users", (request, response) => {
     })
 });
 
+app.post("/get-user", (request, response) => {
+    //request.body.handle will be used to query the "users" collection of the database
+    db.collection("users")
+      .doc(request.body.handle)
+      .get()
+      .then( (documentSnapshot) => {
+        if (documentSnapshot.exists) {
+          return response.status(200).json(documentSnapshot.data());
+        }
+
+        return response.status(500).json({
+          error : "User does not exist"
+        });
+      })
+      .catch( (error) => {
+        return response.status(500).json({
+          error : error.message,
+          errorCode : error.code
+        });
+      })
+});
+
 /* 
 //Route that was used once to update the image property of all of the documents in the "sets" collection.
 //This route added a generic LEGO logo to all of the sets.
@@ -434,7 +456,38 @@ app.get("/test-image", (request, response) => {
 });
 */
 
-/*RETRIEVE THE COLLECTION OF A USER*/
+
+/*RETRIEVE THE COLLECTION OF AN ONLINE USER*/
+app.post("/get-sets-of-user", (request, response) => {
+  db.collection("owned")
+    .where("handle", "==", request.body.handle)
+    .get()
+    .then( (querySnapshot) => {
+      let docs = [];
+      querySnapshot.forEach( (doc) => {
+        docs.push({
+          image : doc.data().image,
+          name : doc.data().name,
+          numOfFigs : doc.data().numOfFigs,
+          pieceCount : doc.data().pieceCount,
+          price : doc.data().price,
+          theme : doc.data().theme,
+          setID : doc.data().setID,
+          yearReleased : doc.data().yearReleased
+        });
+      });
+      return response.status(200).json(docs);
+
+    })
+    .catch( (error) => {
+      return response.status(500).json({
+        error : error.message,
+        errorCode : error.code
+      });
+    })
+});
+
+/*RETRIEVE THE COLLECTION OF A USER (REQUIRES AUTHORIZATION HEADER)*/
 app.get("/get-sets", authenticateJWT, (request, response) => {
   db.collection("owned")
     .where("handle", "==", request.user.handle)
@@ -543,6 +596,13 @@ app.post("/add-set-to-owned", authenticateJWT, (request, response) => {
   const doc = {
     handle: request.user.handle,
     setID: request.body.setID,
+    image : request.body.image,
+    name : request.body.name,
+    numOfFigs : request.body.numOfFigs,
+    pieceCount : request.body.pieceCount,
+    price : request.body.price,
+    theme : request.body.theme,
+    yearReleased : request.body.yearReleased
   };
 
   //Check if the user already has this set in their collection
@@ -553,18 +613,22 @@ app.post("/add-set-to-owned", authenticateJWT, (request, response) => {
     .then((querySnapshot) => {
       if (!querySnapshot.empty) {
         return response.json({
-          message: `You already own ${doc.setID}`,
+          error: `You already own ${doc.setID}`,
         });
       } else {
         //Add set to user collection
         db.collection("owned")
           .add(doc)
-          .get()
           .then((docReference) => {
-            return response
-              .status(200)
-              .send(`Added document with name: ${docReference.id}`);
-          });
+           return response.status(200).json({
+              message : `Added document with ID: ${docReference.id}`
+            });
+          })
+          .catch( () => {
+            return response.status(500).json( {
+              error : "Unable to add document to user's collection"
+            });
+          })
       }
     })
     .catch((error) => {
