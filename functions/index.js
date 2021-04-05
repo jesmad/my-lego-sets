@@ -1,8 +1,6 @@
 // The Cloud Functions for Firebase SDK to create Cloud Functions and setup triggers
 const functions = require("firebase-functions");
 
-
-
 // Framework to supply methods for routing HTTP request, configuring middleware, etc.
 // Express provides an API to create and manage HTTP routes, payloads, and sessions.
 // Cors provides the ability to cricumvent the "same Origin Policy", which is a security mechanism that all web browsers use follow
@@ -11,6 +9,7 @@ const app = express();
 const cors = require("cors");
 
 //The Firebase Admin SDK to access Cloud Firestore
+
 const firebaseConfig = {
   apiKey: "",
   authDomain: "",
@@ -26,10 +25,11 @@ const admin = require("firebase-admin");
 admin.initializeApp();
 
 const firebase = require("firebase");
+const e = require("express");
+const { user } = require("firebase-functions/lib/providers/auth");
 firebase.initializeApp(firebaseConfig);
 
 const db = admin.firestore();
-
 
 //TODO: figure out a way to add images to the storage so that downloaded documents display their correct image
 //var storage = firebase.storage();     //The root (i.e. the default bucket of this app)
@@ -43,6 +43,8 @@ var bucket = admin.storage().bucket();
 // --> POST requests have information embedded in the request package to alter some data in the server-side
 // --> GET requests have unique URLs and should read and return data
 //+ Must terminate request/response cycles with a response method (res.json(), res.render(), res.send(), etc.)
+//+ JWT - JSON Web Token is stored in local storage
+// --> JWT is comprised of a header, payload, and signature and it comes in this format -> (xxxx.yyyy.zzzz)
 
 /*                                                               END OF NOTES                                                          */
 
@@ -89,6 +91,11 @@ const authenticateJWT = (request, response, next) => {
           error: error.code,
         });
       });
+  }
+  else {
+    return response.status(500).json({
+      message: "Authorization header does not exist"
+    });
   }
 };
 
@@ -188,7 +195,8 @@ const corsOptions = {
   optionsSuccessStatus: 204,
 };
 
-app.use(cors(corsOptions)); //
+//app.use(cors(corsOptions)); 
+app.use(cors()); 
 
 //TODO: User Authentication methods
 app.post("/sign-up", (request, response) => {
@@ -362,24 +370,29 @@ app.get("/search-users", (request, response) => {
   let sequences = generateSequences(query);
   const grams = generateGrams(sequences);
 
-  db.collection("users")
-    .where("grams", "array-contains-any", grams)
-    .get()
-    .then( (querySnapshot) => {
-      let docs = [];
-      if (!querySnapshot.empty) {
-        querySnapshot.forEach( (doc) => {
-          docs.push(doc.data());
-        })
-      }
-      return response.status(200).json(docs);
-    })
-    .catch( (error) => {
-      return response.status(500).json( {
-        code : error.code,
-        message : error.message
-      });
-    })
+  if (grams.length >= 1) {
+    db.collection("users")
+      .where("grams", "array-contains-any", grams)   // "array-contains-any" requires a non-empty ArrayValue
+      .get()
+      .then( (querySnapshot) => {
+        let docs = [];
+        if (!querySnapshot.empty) {
+          querySnapshot.forEach( (doc) => {
+            docs.push(doc.data());
+          })
+        }
+        return response.status(200).json(docs);
+      })
+      .catch( (error) => {
+        return response.status(500).json( {
+          code : error.code,
+          message : error.message
+        });
+      })
+  }
+  else {
+    return response.status(200).json([]);
+  }
 });
 
 app.post("/get-user", (request, response) => {
@@ -589,11 +602,56 @@ app.post("/add-grams-to-users", (request, response) => {
   
 });
 */
+
+/*
+app.post("/user-owns-set", authenticateJWT, (request, response) => {
+  //Check if the currently logged in user owns a sepcified set
+  db.collection("owned")
+    .where("setID", "==", request.body.setID)
+    .where("handle", "==", request.user.handle)
+    .get()
+    .then((querySnapshot) => {
+      let userOwns = querySnapshot.empty;
+      return response.status(200).json({
+        exists : userOwns
+      });
+    })
+    .catch( (error) => {
+      return response.status(500).json({
+        message : error.message,
+        code : error.code
+      });
+    })
+});
+*/
+
+app.get("/user-owns-set", (request, response) => {
+  let user = request.query.userHandle;
+  let set = parseInt(request.query.setID, 10);
+
+  db.collection("owned")
+    .where("setID", "==", set)
+    .where("handle", "==", user)
+    .get()
+    .then((querySnapshot) => {
+      let userOwns = querySnapshot.empty;
+      return response.status(200).json({
+        exists : userOwns,
+      });
+    })
+    .catch( (error) => {
+      return response.status(500).json({
+        message : error.message,
+        code : error.code
+      });
+    })
+});
+
+
+
 /*ADD A SET TO A USER'S OWNED COLLECTION*/
 app.post("/add-set-to-owned", authenticateJWT, (request, response) => {
-  //TODO: Connect to Firestore -> Add a document to the "owned" collection.
-
-  const doc = {
+  const dataToSend = {
     handle: request.user.handle,
     setID: request.body.setID,
     image : request.body.image,
@@ -605,69 +663,178 @@ app.post("/add-set-to-owned", authenticateJWT, (request, response) => {
     yearReleased : request.body.yearReleased
   };
 
-  //Check if the user already has this set in their collection
-  db.collection("owned")
-    .where("setID", "==", doc.setID)
-    .where("handle", "==", doc.handle)
-    .get()
-    .then((querySnapshot) => {
-      if (!querySnapshot.empty) {
-        return response.json({
-          error: `You already own ${doc.setID}`,
+  let docRef = db.collection("users").doc(`${dataToSend.handle}`);
+
+  docRef.get()
+    .then( (documentSnapshot) => {
+      //Check if the user exists in the "users" collection
+      if (documentSnapshot.exists) {
+        let userCollection = documentSnapshot.data().collection;
+        //Check if the user already owns the current set that they are trying to add to their collection
+        if (!userCollection.includes(dataToSend.setID)) {
+          userCollection.push(dataToSend.setID);
+          docRef.update( {collection : userCollection } )
+            .then( () => {
+              //Add relationship between set and owner to the "owned" collection
+              db.collection("owned")
+                .add(dataToSend)
+                .then( (documentReference) => {
+                  return response.status(200).json({
+                    message : `Added document with ref ID ${documentReference.id}`
+                  });
+                })
+                .catch( (error) => {
+                  return response.status(500).json({
+                    error : `Unable to add set to "owned" collection`,
+                    code : error.code 
+                  });
+                })
+            })
+            .catch( (error) => {
+              return response.status(500).json({
+                error : `Unable to update ${request.user.handle} 'user' document`,
+                code : error.code 
+              });
+            })
+        }
+        else {
+          return response.status(500).json( {
+            error : `You already own ${dataToSend.setID}`
+          });
+        }
+      }
+      else {
+        return response.status(500).json( {
+          error : `User not found in the 'users' collection`
         });
-      } else {
-        //Add set to user collection
-        db.collection("owned")
-          .add(doc)
-          .then((docReference) => {
-           return response.status(200).json({
-              message : `Added document with ID: ${docReference.id}`
-            });
-          })
-          .catch( () => {
-            return response.status(500).json( {
-              error : "Unable to add document to user's collection"
-            });
-          })
       }
     })
-    .catch((error) => {
-      return response.status(500).json({
-        error: error.code,
-        errorMessage: "/add-set-to-owned FAILED",
-      });
-    });
+    .catch( (error) => {
+      return response.status(500).json( {
+        handle: request.user.handle,
+        error: "Unable to locate user document from server",
+        code: error.code,
+        message : error.message
+      })
+    })
 });
 
 /*Delete a set from a user's collection*/
-app.post("/delete-owned-set/:docID", authenticateJWT, (request, response) => {
-  //TODO: Supply the set to delete by embedding the document ID through the URL or in the request.body
-  //TODO: Ensure that the document supplied in the URL exists before deleting?
-  let docReference = db.collection("owned").doc(`${request.params.docID}`);
-  docReference
-    .get()
-    .then((documentSnapshot) => {
+app.post("/remove-owned-set", authenticateJWT, (request, response) => {
+  let data = {
+    setID : request.body.setID,
+    handle : request.user.handle
+  };
+
+  let docRef = db.collection("users").doc(`${data.handle}`);
+  docRef.get()
+    .then( (documentSnapshot) => {
+      //Check to see if the user exists in the "users" collection
       if (documentSnapshot.exists) {
-        //Ensure that the document has the same owner
-        let docHandle = documentSnapshot.get("handle");
-        if (docHandle === `${request.user.handle}`) {
-          docReference.delete().then(() => {
-            return response.status(200).json({
-              message: `Document with ID ${request.params.docID} successfully deleted.`,
-            });
-          });
-        } else {
-          return response.status(200).json({});
+        let userCollection = documentSnapshot.data().collection;
+        if (userCollection.includes(data.setID)) {
+          //Remove set from 'collection' field in user's document
+          const index = userCollection.indexOf(data.setID);
+          userCollection.splice(index, 1);
+          docRef.update( { collection : userCollection })
+            .then( () => {
+              //Delete relationship between set and user from "owned" collection
+              db.collection("owned")
+                .where("handle", "==", data.handle)
+                .where("setID", "==", data.setID)
+                .limit(1)
+                .get()
+                .then( (querySnapshot) => {
+                  if (!querySnapshot.empty) {
+                    querySnapshot.forEach( (queryDocSnapshot) => {
+                      queryDocSnapshot.ref.delete()
+                        .then( () => {
+                          return response.status(200).json({
+                            message : "Succefully deleted document from 'owned' collection"
+                          });
+                        })
+                        .catch( (error) => {
+                          return response.status(500).json( {
+                            code : error.code,
+                            message : error.message,
+                            error : `Unable to delete relationship from "owned" collection`
+                          });
+                        })
+                    })
+                  }
+                  else {
+                    return response.status(500).json( {
+                      error : `No documents from "owned" collection matched query`
+                    });
+                  }
+                })
+                .catch( (error) => {
+                  return response.status(500).json({
+                    code : error.code,
+                    message : error.message,
+                    error : `Unable to query "owned" collection`
+                  });
+                })
+            })
+            .catch( (error) => {
+              return response.status(500).json( {
+                code : error.code,
+                message : error.message,
+                error : `Unable to update ${data.handle}'s document in the "users" collection`
+              });
+            })
         }
-      } else {
-        return response.status(200).json({
-          message: "DOCUMENT DOES NOT EXIST",
+        else {
+          return response.status(200).json( {
+            error : `${data.setID} is not in user's collection`
+          });
+        }
+      }
+      else {
+        return response.status(200).json( {
+          error : `${data.handle} document does not exist in 'users' collection`
         });
       }
     })
-    .catch((error) => {
+    .catch( (error) => {
+      return response.status(500).json( {
+        code : error.code,
+        message : error.message,
+      });
+    })
+});
+
+app.get("/authenticate-user/:jwt_token", (request, response) => {
+  let idToken = request.params.jwt_token;
+  admin
+    .auth()
+    .verifyIdToken(idToken)
+    .then( (decodedToken) => {
+      let uid = decodedToken.uid;
+      db.collection("users")
+        .where("userID", "==", uid)
+        .limit(1)
+        .get()
+        .then( (querySnapshot) => {
+          let userHandle = querySnapshot.docs[0].data().handle;
+          let userCollection = querySnapshot.docs[0].data().collection;
+          return response.status(200).json({
+            handle : userHandle,
+            collection : userCollection
+          });
+        })
+        .catch( (error) => {
+          return response.status(500).json({
+            message : error.message,
+            code : error.code
+          });
+        })
+
+    })
+    .catch( (error) => {
       return response.status(500).json({
-        message: `/delete-owned-set/${request.params.docID} FAILED`,
+        message : error.message,
+        code : error.code
       });
     });
 });
